@@ -1,0 +1,16 @@
+diff --git a/scripts/gr00t_finetune.py b/scripts/gr00t_finetune.py
+index 4f24b74..c2b36f2 100644
+--- a/scripts/gr00t_finetune.py
++++ b/scripts/gr00t_finetune.py
+@@ -371,7 +371,10 @@ def main(config: ArgsConfig):
+         save_strategy="steps",
+         save_steps=config.save_steps,
+         # evaluation_strategy="no",
+-        save_total_limit=5,
++        # NERO bench: /home2 has ~110G free and one GR00T ckpt is ~11G of params
++        # plus ~22G of AdamW state. Keep params only, one checkpoint at a time.
++        save_total_limit=1,
++        save_only_model=True,
+         report_to=config.report_to,
+         seed=42,
+         do_eval=False,

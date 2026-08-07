@@ -1,0 +1,366 @@
+{
+  "backbone": "act",
+  "stack": "HF LeRobot 0.6.2",
+  "ckpt": "${NERO_ROOT}/runs/act/checkpoints/last/pretrained_model",
+  "train": {
+    "steps": 100000,
+    "batch": 8,
+    "final_train_l1_normalized": 0.059,
+    "epochs": 21.04,
+    "wall": "3h05m",
+    "gpu": "primary training host, one GPU (shared with the gr00t-n15 run)",
+    "wandb": "https://wandb.ai/${WANDB_ENTITY}/nero_backbone_bench/runs/jma3cxd6"
+  },
+  "eval": {
+    "anchors": 1397,
+    "K": 8,
+    "batch_size": 1,
+    "device": "cuda:4",
+    "mae": 2.7272088527679443,
+    "arm": 2.675654649734497,
+    "grip": 3.088089942932129,
+    "per_joint": [
+      2.3132166862487793,
+      3.3405351638793945,
+      2.1717331409454346,
+      2.3397538661956787,
+      2.38563871383667,
+      2.657996654510498,
+      3.520700454711914,
+      3.0880842208862305
+    ],
+    "per_step_mae": [
+      2.3440451622009277,
+      2.415820837020874,
+      2.528386354446411,
+      2.634579658508301,
+      2.7609145641326904,
+      2.9045913219451904,
+      3.0288851261138916,
+      3.2004482746124268
+    ]
+  },
+  "pass_line_full1397": {
+    "mae": 3.0719962120056152,
+    "arm": 2.5352115631103516,
+    "grip": 6.829487323760986,
+    "per_joint": [
+      1.3521170616149902,
+      6.370540618896484,
+      1.3762121200561523,
+      2.837505578994751,
+      1.4034936428070068,
+      1.340906023979187,
+      3.065720796585083,
+      6.829347133636475
+    ],
+    "per_step_mae": [
+      1.6201153993606567,
+      2.0369155406951904,
+      2.458371639251709,
+      2.8613386154174805,
+      3.2805604934692383,
+      3.6944124698638916,
+      4.1041131019592285,
+      4.520142078399658
+    ]
+  },
+  "verdict": {
+    "overall_passes": true,
+    "arm_passes": false,
+    "grip_passes": true,
+    "note": "passes overall ONLY via the gripper; arm is WORSE than hold-state. score.py flags overall only."
+  },
+  "determinism": {
+    "draws": 5,
+    "std_mae": 0.0,
+    "bit_exact_across_draws": true,
+    "maxdiff": 0.0,
+    "subset_rows_match_full_run": true,
+    "subset_maxdiff": 0.0,
+    "subset_pass_line": {
+      "mae": 3.198,
+      "arm": 2.591,
+      "grip": 7.449
+    },
+    "note": "deterministic; depends on policy.eval() disabling dropout=0.1"
+  },
+  "leak_check": {
+    "channel": "norm-stats (ckpt-baked, float32)",
+    "ckpt_vs_train111": {
+      "min_max_maxdev": 0.0,
+      "mean_std_maxdev": 1.1444e-05
+    },
+    "ckpt_vs_full131_leaked": {
+      "action_mean": 1.088,
+      "action_std": 0.9442,
+      "state_mean": 1.08,
+      "state_std": 0.9432
+    },
+    "snr": 143000,
+    "zero_power_slots": "23/64, all on min/max",
+    "val_max_gt_stat_max": {
+      "action": "5/16",
+      "state": "4/16"
+    },
+    "blind_spot": "norm-stats channel only; says nothing about the training sampler",
+    "live_object_channel": {
+      "question": "does the predict-time processor hold ckpt stats, or the val dataset's ds.meta.stats passed alongside pretrained_path?",
+      "why_naive_test_has_no_power": "the bench copy's meta/stats.json was already rewritten to train-111, so ds.meta.stats EQUALS the correct value -- output identical under both hypotheses",
+      "method": "injection: rebuild processors with dataset_stats shifted +1000",
+      "tensors_moved": 0,
+      "tensors_total": 90,
+      "discriminating_rows": 20,
+      "zero_power_slots": 0,
+      "worst_dev_vs_train111": 1.14e-05,
+      "closest_dev_vs_full131": 0.943,
+      "snr": 82000.0,
+      "verdict": "PASS -- dataset_stats kwarg is inert when pretrained_path is set; no val self-normalization",
+      "script": "scripts/lerobot_live_stats_provenance.py"
+    },
+    "normalization_artifacts_enumerated": {
+      "count": 1,
+      "artifact": "ckpt safetensors (NormalizerProcessorStep + UnnormalizerProcessorStep, 90 tensors)",
+      "no_second_table": "unlike N1.7 (stats.json + relative_stats.json), LeRobot has no separate delta/relative table",
+      "dataset_derived_keys": [
+        "action",
+        "observation.state"
+      ],
+      "images_carry_no_dataset_stats": "ACT image stats are ImageNet constants (max|live-IMAGENET_STATS|=1.4e-8; datasets/factory.py:137 use_imagenet_stats OVERWRITES dataset values); SmolVLA VISUAL=IDENTITY (not normalized at all)"
+    }
+  },
+  "video_integrity": {
+    "anchors": 1397,
+    "cams": 2,
+    "distinct_md5": "1397/1397 both cams",
+    "near_black": 0,
+    "near_uniform": 0,
+    "cam_aliased": 0,
+    "blind_spot": "cannot detect a cam_high/cam_wrist LABEL swap"
+  },
+  "action_parameterization": {
+    "family": "ABSOLUTE",
+    "arm": "absolute joint positions",
+    "gripper": "absolute (mm)",
+    "measured_at": "training target tensor (dataset -> preprocessor -> batch[ACTION]), unnormalized",
+    "loss_site": "modeling_act.py:145 F.l1_loss(batch[ACTION], actions_hat)",
+    "residual_vs_H_abs": 7.334e-06,
+    "residual_vs_H_delta_action_minus_state": 126.0,
+    "separation": 17180000.0,
+    "ckpt_action_mean": [
+      0.494,
+      -15.79,
+      0.264,
+      102.251,
+      -7.128,
+      0.971,
+      67.256,
+      14.0
+    ],
+    "pipeline_relative_steps": "NONE",
+    "caveat": "LeRobot DOES ship relative machinery (processor/relative_action_processor.py:41) wired into pi0/pi05/pi0_fast/groot via use_relative_actions; absent from ACTConfig. Convention alone is not evidence -- this was measured.",
+    "board_family_split": "absolute {act, smolvla, n15, oft} 4 : delta-arm {n17, pi0, pi05} 3",
+    "script": "scripts/lerobot_action_parameterization.py"
+  },
+  "overfit": {
+    "method": "same eval-mode / raw-unit / K=8 measurement on the TRAIN split, same ckpt",
+    "n_anchors_each": {
+      "train": 7475,
+      "val": 1397
+    },
+    "train": {
+      "mae": 1.1852353811264038,
+      "arm": 1.160660743713379,
+      "grip": 1.35725736618042,
+      "hold_mae": 3.079914093017578,
+      "hold_arm": 2.6384117603302,
+      "hold_grip": 6.170430660247803
+    },
+    "val": {
+      "mae": 2.7272088527679443,
+      "arm": 2.675654649734497,
+      "grip": 3.088089942932129,
+      "hold_mae": 3.0719962120056152,
+      "hold_arm": 2.5352115631103516,
+      "hold_grip": 6.829487323760986
+    },
+    "generalization_ratio": 2.301,
+    "ratio_arm": 2.3053,
+    "ratio_grip": 2.2752,
+    "val400_vs_full1397_subsample_error_pct": 2.2,
+    "supersedes": "the earlier 1.73x, which wrongly compared TRAIN-mode normalized running l1 (dropout+aug) against eval-mode raw-unit val MAE -- mixed overfit with a units+mode discrepancy. True gap is WORSE.",
+    "key_finding": "FLOOR vs COLLAPSE, and it is COLLAPSE. gr00t-n15 showed the framing 'ACT's arm is worse than do-nothing' is weighting-dependent (frame-weighted margin -0.1404 flips to +0.0029 episode-equal -- reproduced here exactly), so that gap is simply unresolved. The question that survives reweighting is whether ACT's arm sits at do-nothing level because the architecture cannot do better (floor) or because it fails to transfer (collapse). On TRAIN the arm beats hold by +1.4778 frame-weighted / +1.5203 episode-equal -- 2.3x better than do-nothing under BOTH calibers -- while on val it is indistinguishable from do-nothing under both. A floor would hold on train too. It does not: ACT's arm CAN represent this task and does not transfer.",
+    "each_split_has_own_hold_line": {
+      "train_full7475": 3.079914093017578,
+      "val_full1397": 3.0719962120056152,
+      "note": "val hold rebuild == the frozen board pass line 3.0719962120056152 bit-exact; train hold reproduces openvla-oft's independently-built 3.0799 to every digit"
+    },
+    "tool_validation": "rebuilt val anchors reproduce frozen val_anchors.npz bit-for-bit on episodes/frames/gt/state",
+    "script": "scripts/lerobot_train_split_eval.py",
+    "split_difficulty_control": {
+      "why": "openvla-oft's rider: a train/val gap is not overfit evidence until the two splits' INTRINSIC DIFFICULTY difference is subtracted",
+      "method": "constant (image-blind) predictors, pure numpy, no model and no GPU -- scripts/lerobot_split_difficulty.py. Reported at FULL population (7475 train / 1397 val): these predictors cost nothing to evaluate, so there is no reason to run them on the model's 400-anchor subsample.",
+      "verdict": "At full population the pure-difficulty null is 0.9989 -- val is 0.11% EASIER -- so intrinsic difficulty explains essentially NONE of the train/val gap; the whole ratio is the model's. My earlier '2.3% of the gap' was itself a 400-anchor artifact. Sharpest evidence that the subsampling default was the defect: a MODEL-FREE constant predictor moves 2.4% between the n=400 draw (1.0226) and the population (0.9989) -- no weights, no RNG, no GPU, so only sampling can have moved it.",
+      "note_hold_direction": "The 400-anchor hold ratio 0.930 read as 'val is much easier in DELTA space'; at full population it is 0.9974, so that effect was almost entirely sampling. The general point survives and is worth keeping: hold-state is a DELTA-flavoured proxy, so match the proxy to the row's parameterization -- const-abs for an absolute leg.",
+      "anchor_construction_is_uniform_in_time": "stride 5, drop last K per episode -- anchors are proportional to episode length in BOTH splits, so oft's 'per-episode N dilutes long episodes differently' cannot arise by construction; val rebuild asserted bit-exact vs frozen val_anchors.npz",
+      "free_byproduct_split_is_not_adversarial": "const-abs fitted on TRAIN vs on each split's own anchors differ by <1.1% (train 20.9949 vs 20.9359, val 21.6432 vs 21.4090) => the two splits' marginal action distributions are near-identical; holds board-wide",
+      "ratios_val_over_train_FULL_POPULATION": {
+        "const_abs_own_DIFFICULTY_ONLY": 0.9989,
+        "const_abs_train_difficulty_plus_marginal_memorization": 1.0127,
+        "hold_state_delta_space_proxy": 0.9974,
+        "act_measured": "PENDING full-population re-run (--n 0); the 2.1405 below is the 400-anchor draw"
+      },
+      "ratios_val_over_train_400_anchor_draw": {
+        "const_abs_own_DIFFICULTY_ONLY": 1.0226,
+        "const_abs_train_difficulty_plus_marginal_memorization": 1.0309,
+        "hold_state_delta_space_proxy": 0.9304,
+        "act_measured": 2.1405
+      }
+    },
+    "arm_is_pure_generalization_failure": "train arm 1.2256 vs that split's OWN hold 2.8957 = +57.7%; val arm 2.5792 vs 2.5075 = -2.9%; difficulty diff is only 2.3% => not an architectural error floor. Supersedes my earlier 'flat floor' reading.",
+    "subsample_caveat": "EVERY number in overfit.train / overfit.val -- INCLUDING BOTH HOLD LINES -- is a 400-anchor draw. lerobot_train_split_eval.py's --n defaulted to 400 (openvla-oft caught it; default is now 0=ALL and a subset prints a WARNING). Measured cost: ACT's val MAE has sd 0.063 over 400-anchor draws (95% +-0.124); the seed-0 draw read 2.6665 against the full-1397 truth 2.7272, so the ratio inherits ~+-0.13 -- the same order as real gaps between backbones. The DIRECTION of the overfit finding is unaffected (2.14 is nowhere near 1.0) but 2.141 must NOT be compared digit-for-digit against another leg's ratio. Full-population re-run is pending a GPU window.",
+    "full_population_hold_lines": {
+      "train": {
+        "n_anchors": 7475,
+        "mae": 3.079914093017578,
+        "arm": 2.6384117603302,
+        "grip": 6.170430660247803
+      },
+      "val": {
+        "n_anchors": 1397,
+        "mae": 3.071996212005615,
+        "arm": 2.5352115631103516,
+        "grip": 6.829487323760986
+      },
+      "train_over_val": 1.0025774384034132,
+      "supersedes": "each_split_has_own_hold_line's 3.352 / 3.119, which were 400-anchor draws. The two splits' do-nothing difficulty differs by 0.26%, NOT the 7.5% the subsample suggested.",
+      "independent_agreement": "openvla-oft rebuilt anchors from data/b2_oft/traj.npz and reported 3.0799/2.6384/6.1704 and 3.0720/2.5352/6.8295; my rebuild from the b2 episode parquets matches to every reported digit, and my val rebuild equals the frozen val_anchors.npz pass line 3.0719962120056152 exactly (==, not allclose). Two independent anchor builders."
+    },
+    "scope": "FULL POPULATION both splits (--n 0). No subsampling, no draw, no seed.",
+    "weighting": "frame-length-weighted: unweighted mean over anchors, so a long episode contributes proportionally more anchors. BOTH splits in the same caliber. Episode-equal caliber also computed -- see weighting_robustness below.",
+    "ratio_se": {
+      "mae": 0.12217368185520172,
+      "arm": 0.1427287757396698,
+      "grip": 0.11807286739349365,
+      "method": "delete-one-EPISODE jackknife per split + delta method for the ratio of means over two disjoint clustered samples; cross-checked by a pooled union jackknife (agrees to <2%)",
+      "excess_over_difficulty_sigma": 12.087522506713867
+    },
+    "SUPERSEDED_n400_numbers": {
+      "n_anchors_each": 400,
+      "train": {
+        "mae": 1.2457408905029297,
+        "arm": 1.2256414890289307,
+        "grip": 1.3864364624023438,
+        "hold_mae": 3.352048397064209,
+        "hold_arm": 2.8956832885742188,
+        "hold_grip": 6.54660177230835
+      },
+      "val": {
+        "mae": 2.6665048599243164,
+        "arm": 2.5792462825775146,
+        "grip": 3.277315139770508,
+        "hold_mae": 3.1187801361083984,
+        "hold_arm": 2.507537603378296,
+        "hold_grip": 7.397479057312012
+      },
+      "generalization_ratio": 2.141,
+      "ratio_arm": 2.104,
+      "ratio_grip": 2.364,
+      "why": "--n defaulted to 400, silently narrowing the statistical population. Every number in this block was a single 400-anchor draw. The ratio moved 2.141 -> 2.301 (+7.5%) at full population, i.e. the subsample biased the overfit DOWNWARD."
+    },
+    "weighting_robustness": {
+      "why": "gr00t-n15 measured that per-frame -> per-episode reweighting is a DETERMINISTIC shift (not sampling noise) which moves numerator and denominator in OPPOSITE directions (corr(ep length, model MAE) +0.34 vs corr(ep length, hold MAE) -0.62), so any model-vs-hold quantity must be shown in a stated caliber.",
+      "calibers": {
+        "TOTAL_frame": {
+          "train": 1.1852353811264038,
+          "train_hold": 3.079914093017578,
+          "train_margin": 1.8946787118911743,
+          "val": 2.7272088527679443,
+          "val_hold": 3.0719962120056152,
+          "val_margin": 0.3447873592376709,
+          "ratio_val_over_train": 2.300985097885132
+        },
+        "TOTAL_episode": {
+          "train": 1.1748487949371338,
+          "train_hold": 3.120535135269165,
+          "train_margin": 1.9456863403320312,
+          "val": 2.6557364463806152,
+          "val_hold": 3.136549234390259,
+          "val_margin": 0.48081278800964355,
+          "ratio_val_over_train": 2.2604920864105225
+        },
+        "ARM_frame": {
+          "train": 1.160660743713379,
+          "train_hold": 2.6384117603302,
+          "train_margin": 1.4777510166168213,
+          "val": 2.675654649734497,
+          "val_hold": 2.5352115631103516,
+          "val_margin": -0.1404430866241455,
+          "ratio_val_over_train": 2.305285692214966
+        },
+        "ARM_episode": {
+          "train": 1.1503124237060547,
+          "train_hold": 2.670576572418213,
+          "train_margin": 1.5202641487121582,
+          "val": 2.596487522125244,
+          "val_hold": 2.5994036197662354,
+          "val_margin": 0.002916097640991211,
+          "ratio_val_over_train": 2.257201910018921
+        },
+        "GRIP_frame": {
+          "train": 1.35725736618042,
+          "train_hold": 6.170430660247803,
+          "train_margin": 4.813173294067383,
+          "val": 3.088089942932129,
+          "val_hold": 6.829487323760986,
+          "val_margin": 3.7413973808288574,
+          "ratio_val_over_train": 2.275242805480957
+        },
+        "GRIP_episode": {
+          "train": 1.346604585647583,
+          "train_hold": 6.270242691040039,
+          "train_margin": 4.923638343811035,
+          "val": 3.0704774856567383,
+          "val_hold": 6.896568298339844,
+          "val_margin": 3.8260908126831055,
+          "ratio_val_over_train": 2.2801625728607178
+        }
+      },
+      "verdict": "The OVERFIT RATIO is caliber-robust: 2.301 frame-weighted vs 2.260 episode-equal (TOTAL), 2.305 vs 2.257 (ARM), 2.275 vs 2.280 (GRIP) -- all shifts are well inside the +-0.12 episode-jackknife SE. What is NOT caliber-robust is the cross-model arm-vs-hold margin on val, which changes sign. Both facts have the same cause and opposite consequences: reweighting moves a SMALL difference of two similar numbers, and leaves a 2.3x RATIO alone.",
+      "independent_reproduction": "episode-equal val arm margin +0.0029 vs hold reproduces gr00t-n15's independently computed +0.0029 exactly (different code, different stack, same frozen anchors)"
+    }
+  },
+  "episodes_kwarg_semantics_0_6_2": {
+    "measured": "episodes= filters FRAMES (len(ds) 7106/38025/<third value garbled in this record; 7106+38025=45131 = the dataset's total frame count, so it was almost certainly 45131 -- left as recorded rather than silently corrected, because this field claims to be a measurement>) but NOT meta.stats (bit-identical across all three); meta.total_episodes stays 131",
+    "control_spacing_action_mean_train111_vs_val20": 6.9104,
+    "what_actually_makes_this_leg_clean": "prepare_b2_v30.py rewrote meta/stats.json to the train-111 aggregate -- NOT episodes=, which never protected anything",
+    "pristine_dataset_has_no_stats_json": "pick_pink_sponge_b2 keeps per-episode stats in meta/episodes/*.parquet; ds.meta.stats there aggregates live over all 131"
+  },
+  "significance": {
+    "source": "gr00t-n17 scripts/paired_signif.py (episode cluster-jackknife, 20 val eps)",
+    "vs_pass_line": {
+      "gap": 0.3448,
+      "paired_se": 0.18284,
+      "sigma": 1.9,
+      "rho": -0.16,
+      "resolved_at_2sigma": false
+    },
+    "vs_random_init": {
+      "gap": 17.4761,
+      "paired_se": 0.90126,
+      "sigma": 19.4,
+      "resolved": true
+    },
+    "note": "ACT learned (19.4 sigma) but does NOT significantly beat do-nothing (1.9 sigma). ACT is deterministic so episode-SE is the whole story (no sampling term)."
+  },
+  "delivery_commitment": "row = final checkpoint, pre-committed without looking at val; intermediate ckpts (SmolVLA save_freq=5000) are a diagnostic curve only, never a selection pool",
+  "preds_write_gate": {
+    "guard": "lerobot_predict.py refuses to write preds_*.npz if the K=8 prefix has any non-finite cell",
+    "why": "gr00t-n15 measured a NaN row misorders the WHOLE board (score.py's mae>=HOLD_MAE is False for NaN; a NaN sort key breaks Timsort transitivity); gr00t-n17 hit a variant where a NaN SE fell into an `else inf` branch and printed RESOLVED. Every new consumer that globs preds/ needs its own ingestion gate -- a write-side gate makes the bad file not exist.",
+    "controls": {
+      "clean_run_writes": "exit 0",
+      "one_NaN_of_192_cells": "exit 1, no file on disk"
+    },
+    "scoped_to_K": "checks pred[:, :K, :] only, so it cannot false-fire on padding past the scoring window"
+  }
+}

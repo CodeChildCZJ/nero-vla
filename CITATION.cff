@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+type: software
+title: "NERO-VLA: an offline backbone benchmark on real-robot manipulation data"
+message: "If you use this benchmark or its evaluation protocol, please cite it."
+abstract: >-
+  Seven vision-language-action backbones (pi0, pi0.5, GR00T N1.5, GR00T N1.7,
+  OpenVLA-OFT, SmolVLA, ACT) fine-tuned on the same 131-episode real-robot
+  manipulation dataset and compared by open-loop action-chunk mean absolute
+  error on a leak-free 20-episode held-out split. The split, the frozen
+  evaluation anchors and every backbone's predictions are committed, so the
+  leaderboard reproduces byte-for-byte with numpy alone -- no GPU, dataset or
+  checkpoint required. The repository also contains the pi0.5 real-robot
+  deployment line the dataset came from. Note this is a recipe-level
+  comparison rather than a controlled architecture A/B, and no checkpoint has
+  been evaluated in closed loop on hardware; see docs/CAVEATS.md.
+authors:
+  - name: "CodeChildCZJ"
+    alias: "CodeChildCZJ"
+repository-code: "https://github.com/CodeChildCZJ/nero-vla"
+license: Apache-2.0
+date-released: "2026-08-07"
+keywords:
+  - vision-language-action
+  - robot-learning
+  - imitation-learning
+  - manipulation
+  - benchmark
+  - reproducibility

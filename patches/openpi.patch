@@ -1,0 +1,501 @@
+diff --git a/scripts/train.py b/scripts/train.py
+index 5d28941..5e0d14a 100644
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -15,6 +15,7 @@ import numpy as np
+ import optax
+ import tqdm_loggable.auto as tqdm
+ import wandb
++from torch.utils.tensorboard import SummaryWriter
+ 
+ import openpi.models.model as _model
+ import openpi.shared.array_typing as at
+@@ -217,6 +218,12 @@ def main(config: _config.TrainConfig):
+     )
+     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+ 
++    # tensorboard live loss logging
++    tb_dir = config.checkpoint_dir / "tb"
++    tb_dir.mkdir(parents=True, exist_ok=True)
++    tb_writer = SummaryWriter(log_dir=str(tb_dir), flush_secs=10)
++    logging.info(f"tensorboard logdir: {tb_dir}")
++
+     data_loader = _data_loader.create_data_loader(
+         config,
+         sharding=data_sharding,
+@@ -227,11 +234,12 @@ def main(config: _config.TrainConfig):
+     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+ 
+     # Log images from first batch to sanity check.
+-    images_to_log = [
+-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+-    ]
+-    wandb.log({"camera_views": images_to_log}, step=0)
++    if config.wandb_enabled:
++        images_to_log = [
++            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
++            for i in range(min(5, len(next(iter(batch[0].images.values())))))
++        ]
++        wandb.log({"camera_views": images_to_log}, step=0)
+ 
+     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
+     jax.block_until_ready(train_state)
+@@ -266,6 +274,9 @@ def main(config: _config.TrainConfig):
+             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+             pbar.write(f"Step {step}: {info_str}")
+             wandb.log(reduced_info, step=step)
++            for k, v in reduced_info.items():
++                tb_writer.add_scalar(k, float(v), step)
++            tb_writer.flush()
+             infos = []
+         batch = next(data_iter)
+ 
+diff --git a/src/openpi/serving/websocket_policy_server.py b/src/openpi/serving/websocket_policy_server.py
+index bdefa98..3cefff0 100644
+--- a/src/openpi/serving/websocket_policy_server.py
++++ b/src/openpi/serving/websocket_policy_server.py
+@@ -61,6 +61,29 @@ class WebsocketPolicyServer:
+                 action = self._policy.infer(obs)
+                 infer_time = time.monotonic() - infer_time
+ 
++                # === BEGIN trace (added 2026-06-07 for NERO debug) ===
++                import os, json as _json
++                trace_path = os.environ.get("OPENPI_TRACE")
++                if trace_path:
++                    try:
++                        import numpy as _np
++                        _state = obs.get("observation/state", obs.get("state"))
++                        _state_l = _state[:8].tolist() if hasattr(_state, "tolist") else list(_state)[:8]
++                        _actions = action.get("actions")
++                        _chunk = _actions[:, :8].tolist() if hasattr(_actions, "tolist") else None
++                        _rec = {
++                            "ts": start_time,
++                            "infer_ms": infer_time * 1000,
++                            "state_8": _state_l,
++                            "chunk_8": _chunk,
++                            "prompt": obs.get("prompt", ""),
++                        }
++                        with open(trace_path, "a") as _f:
++                            _f.write(_json.dumps(_rec) + "\n")
++                    except Exception as _e:
++                        logger.warning(f"trace write failed: {_e}")
++                # === END trace ===
++
+                 action["server_timing"] = {
+                     "infer_ms": infer_time * 1000,
+                 }
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 4ca47e1..876fad9 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -557,6 +557,114 @@ class TrainConfig:
+ 
+ 
+ # Use `get_config` if you need to get a config by name in your code.
++
++
++# ============================================================
++# NERO single-arm config (7 joint deg + 1 gripper mm, 8-dim active out of 16 stored)
++# Mirrors LeRobotLiberoDataConfig. Inputs/Outputs inlined to avoid extra files.
++# Added 2026-06-06 for pick_pink_sponge_v1 fine-tune from pi05_base.
++# ============================================================
++
++import einops as _einops  # noqa: E402
++import numpy as np  # noqa: E402
++
++
++NERO_ACTION_DIM = 8
++
++
++def _nero_parse_image(image):
++    image = np.asarray(image)
++    if np.issubdtype(image.dtype, np.floating):
++        image = (255 * image).astype(np.uint8)
++    if image.shape[0] == 3:
++        image = _einops.rearrange(image, "c h w -> h w c")
++    return image
++
++
++@dataclasses.dataclass(frozen=True)
++class _NeroInputs(_transforms.DataTransformFn):
++    model_type: _model.ModelType
++    mask_gripper_state: bool = False  # True=输入state夹爪维(dim7)置常数, 破 causal confusion (chunk[0]复读state.grip)
++
++    def __call__(self, data: dict) -> dict:
++        base_image = _nero_parse_image(data["observation/image"])
++        wrist_image = _nero_parse_image(data["observation/wrist_image"])
++        state_16 = np.asarray(data["observation/state"], dtype=np.float32)
++        state_8 = np.array(state_16[:NERO_ACTION_DIM])
++        if self.mask_gripper_state:
++            state_8[NERO_ACTION_DIM - 1] = 0.0  # 夹爪维置常数: 训推同走此路, 逼模型从视觉(腕cam)决定夹爪而非复读
++
++        inputs = {
++            "state": state_8,
++            "image": {
++                "base_0_rgb": base_image,
++                "left_wrist_0_rgb": wrist_image,
++                "right_wrist_0_rgb": np.zeros_like(base_image),
++            },
++            "image_mask": {
++                "base_0_rgb": np.True_,
++                "left_wrist_0_rgb": np.True_,
++                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
++            },
++        }
++        if "actions" in data:
++            act_16 = np.asarray(data["actions"], dtype=np.float32)
++            inputs["actions"] = act_16[..., :NERO_ACTION_DIM]
++        if "prompt" in data:
++            inputs["prompt"] = data["prompt"]
++        return inputs
++
++
++@dataclasses.dataclass(frozen=True)
++class _NeroOutputs(_transforms.DataTransformFn):
++    def __call__(self, data: dict) -> dict:
++        return {"actions": np.asarray(data["actions"][:, :NERO_ACTION_DIM])}
++
++
++@dataclasses.dataclass(frozen=True)
++class NeroDataConfig(DataConfigFactory):
++    use_delta_joint_actions: bool = True
++    default_prompt: str | None = None
++    mask_gripper_state: bool = False  # True=输入state夹爪维置常数, 治 gripper causal confusion
++
++    # NERO LeRobot v2.1 stores the action column as singular "action" (not "actions").
++    action_sequence_keys: Sequence[str] = ("action",)
++
++    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
++        default=_transforms.Group(
++            inputs=[
++                _transforms.RepackTransform({
++                    "observation/image": "observation.images.cam_high",
++                    "observation/wrist_image": "observation.images.cam_wrist",
++                    "observation/state": "observation.state",
++                    "actions": "action",
++                })
++            ]
++        )
++    )
++
++    @override
++    def create(self, assets_dirs, model_config: _model.BaseModelConfig) -> DataConfig:
++        data_transforms = _transforms.Group(
++            inputs=[_NeroInputs(model_type=model_config.model_type, mask_gripper_state=self.mask_gripper_state)],
++            outputs=[_NeroOutputs()],
++        )
++        if self.use_delta_joint_actions:
++            delta_action_mask = _transforms.make_bool_mask(7, -1)
++            data_transforms = data_transforms.push(
++                inputs=[_transforms.DeltaActions(delta_action_mask)],
++                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
++            )
++        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
++        return dataclasses.replace(
++            self.create_base_config(assets_dirs, model_config),
++            repack_transforms=self.repack_transforms,
++            data_transforms=data_transforms,
++            model_transforms=model_transforms,
++            action_sequence_keys=self.action_sequence_keys,
++        )
++
++
+ _CONFIGS = [
+     #
+     # Inference Aloha configs.
+@@ -968,6 +1076,294 @@ _CONFIGS = [
+     # RoboArena & PolaRiS configs.
+     *roboarena_config.get_roboarena_configs(),
+     *polaris_config.get_polaris_configs(),
++    #
++    # NERO real-robot fine-tune from pi05_base
++    #
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=50),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
++                asset_id="trossen",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=15_000,
++        log_interval=50,
++        save_interval=2500,
++        keep_period=2500,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=14_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v2: DROID-style horizon=16, 5000 step, save every 1000 (5 mid ckpts)
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v2",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                assets_dir="gs://openpi-assets/checkpoints/pi05_base/assets",
++                asset_id="trossen",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=5_000,
++        log_interval=50,
++        save_interval=1_000,
++        keep_period=1_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=5_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v3: same as v2 but with CORRECT norm_stats (NERO 8-dim from our own compute, not trossen)
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v3",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v1",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=5_000,
++        log_interval=50,
++        save_interval=1_000,
++        keep_period=1_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=5_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v4: SAME as v3 but with new CLEAN dataset (50 ep, 18964 frames, more diverse gripper timing)
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v4",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v2_clean",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v2_clean",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=5_000,
++        log_interval=50,
++        save_interval=1_000,
++        keep_period=1_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=5_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v4_extend: continue from v4/4999 to 15000 step (resume + extend, NOT restart)
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v4_extend",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v2_clean",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v2_clean",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=15_000,
++        log_interval=50,
++        save_interval=1_000,
++        keep_period=1_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=15_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v5: 51ep (50 clean + 新 ep050) + 20000 step (测长训到收敛). 必须重算 norm_stats (asset_id 指 v3 自己的).
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v5",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v3",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v3",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=32,
++        num_train_steps=20_000,
++        log_interval=50,
++        save_interval=2_000,
++        keep_period=2_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=20_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v6: 单变量=mask_gripper_state (治 gripper causal confusion: chunk[0]复读state.grip).
++    # 数据/norm_stats/horizon 全同 v5; 只把输入state夹爪维置常数. 快跑8k做forward test.
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v6_gmask",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v3",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v3",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++            mask_gripper_state=True,
++        ),
++        batch_size=32,
++        num_train_steps=8_000,
++        log_interval=50,
++        save_interval=1_000,
++        keep_period=2_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=8_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v7: 官方/agilex recipe — 去 mask (mask_gripper_state=False) + 数据已从源头修 copycat
++    # (recorder qpos[7]=follower SDK readback ≠ action[7]=leader 命令, test2 验 max33.96mm/0重合);
++    # ema_decay 回标准 0.99; diverse 多位置 (23ep/13251帧, 任意位置铺开 j2std45°/j4范围-26~112, 闭位起步,
++    # 抓取夹爪决定性闭到0.0). ⚠️ 数据落地后: 建 local/pick_pink_sponge_v7 symlink →
++    # compute_norm_stats --config-name pi05_nero_pick_pink_sponge_v7 → 训. 23ep 用 10k步(防过拟合), save每2k挑最优.
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v7",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=16),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v7",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v7",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++            mask_gripper_state=False,
++        ),
++        # batch16 (=agilex pi05_aloha 官方) + ema_decay=None: 共享GPU2(邻居占25G只71.8G空), EMA多占~12.5G会OOM.
++        # batch32+EMA0.99 实测 OOM(需~87G). batch16+noEMA ~64G 舒适装下. 核心官方改动(去mask/修数据)不受影响.
++        batch_size=16,
++        num_train_steps=15_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=15_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=None,
++    ),
++    # v8 (2026-06-17): 62ep/23683帧 conditioned multimodal (海绵位置→grasp构型, r(cx/cy,j4)~0.93-0.95,
++    # 双数据双分析确认). 治 v7 闭环漂移 = 位置+approach 全覆盖(左中右整桌均衡)+SOP抓取保持几帧.
++    # 配方基于 v7, czj 调 3 处: ①horizon 16→10(=官方pi05_libero, chunk更短0.33s@30fps) ②ema None→0.99(官方默认,
++    # GPU1/2 有空间, horizon缩短也省显存) ③跑 GPU1. batch16/mask off/pi05_base/cosine 不变. no-crop 干净隔离(crop留v9).
++    # 62ep ~2.7x v7的23ep → 30k步(czj 拍, v7 15k)学透 位置→构型 映射, save每3k 真机挑最优(不锁最后一个).
++    TrainConfig(
++        name="pi05_nero_pick_pink_sponge_v8",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=NeroDataConfig(
++            repo_id="local/pick_pink_sponge_v8",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_v8",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++            mask_gripper_state=False,
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=30_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader(
++            "gs://openpi-assets/checkpoints/pi05_base/params"
++        ),
++        ema_decay=0.99,
++    ),
+ ]
+ 
+ if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

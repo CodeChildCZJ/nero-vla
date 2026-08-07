@@ -1,0 +1,18 @@
+# 训练产物与环境 —— 体积过大,不入库
+runs/
+venvs/
+wandb/
+*.ckpt
+*.safetensors
+*.mp4
+*.parquet
+
+# 数据集本体不公开(见 docs/DATA.md)
+data/raw/
+
+# 本地基准与临时物
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+.golden_board.txt

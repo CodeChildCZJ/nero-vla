@@ -1,0 +1,312 @@
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 5cc3009..8086aad 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
+ import openpi.policies.aloha_policy as aloha_policy
+ import openpi.policies.droid_policy as droid_policy
+ import openpi.policies.libero_policy as libero_policy
++import openpi.policies.nero_policy as nero_policy
+ import openpi.shared.download as _download
+ import openpi.shared.normalize as _normalize
+ import openpi.training.droid_rlds_dataset as droid_rlds_dataset
+@@ -461,6 +462,73 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
+         )
+ 
+ 
++@dataclasses.dataclass(frozen=True)
++class LeRobotNeroDataConfig(DataConfigFactory):
++    """Single-arm NERO (7DoF + gripper = 8-dim) LeRobot config.
++
++    Pure-official single-arm recipe: identical in structure to the DROID 8-dim /
++    Libero templates. Joints -> delta, gripper -> absolute, via make_bool_mask(7, -1).
++    The only robot-specific piece is nero_policy.NeroInputs/NeroOutputs (which the
++    official Libero docstring explicitly tells you to copy & adapt for your robot).
++    """
++
++    use_delta_joint_actions: bool = True
++    # SERVE-ONLY: the ref model is trained in rad + gripper[0,1] (transforms baked into the
++    # b2_ref dataset). Set True only for the serve config so the server converts deg+mm <->
++    # rad+[0,1] internally and client_b (deg+mm) connects unchanged. Leave False for training
++    # configs (the dataset is already in the model's native space). Has NO effect on training.
++    serve_convert_degmm: bool = False
++    default_prompt: str | None = None
++    action_sequence_keys: Sequence[str] = ("action",)
++
++    @override
++    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
++        # Remap LeRobot dataset columns (produced by the official hdf5_to_lerobot
++        # converter) to the model input keys. NERO has two cameras: cam_high + cam_wrist.
++        repack_transform = _transforms.Group(
++            inputs=[
++                _transforms.RepackTransform(
++                    {
++                        "observation/image": "observation.images.cam_high",
++                        "observation/wrist_image": "observation.images.cam_wrist",
++                        "observation/state": "observation.state",
++                        "actions": "action",
++                    }
++                )
++            ]
++        )
++
++        data_transforms = _transforms.Group(
++            inputs=[nero_policy.NeroInputs(model_type=model_config.model_type)],
++            outputs=[nero_policy.NeroOutputs()],
++        )
++        if self.use_delta_joint_actions:
++            delta_action_mask = _transforms.make_bool_mask(7, -1)
++            data_transforms = data_transforms.push(
++                inputs=[_transforms.DeltaActions(delta_action_mask)],
++                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
++            )
++
++        # SERVE-ONLY deg+mm <-> rad+[0,1] conversion (ref). Appended last so DegToRad runs after
++        # NeroInputs (on the "state" key) & before Normalize, and RadToDeg runs after Unnormalize
++        # & NeroOutputs (on the final "actions"). Keeps the server's external contract = deg+mm.
++        if self.serve_convert_degmm:
++            data_transforms = data_transforms.push(
++                inputs=[nero_policy.NeroRefDegToRad()],
++                outputs=[nero_policy.NeroRefRadToDeg()],
++            )
++
++        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
++
++        return dataclasses.replace(
++            self.create_base_config(assets_dirs, model_config),
++            repack_transforms=repack_transform,
++            data_transforms=data_transforms,
++            model_transforms=model_transforms,
++            action_sequence_keys=self.action_sequence_keys,
++        )
++
++
+ @dataclasses.dataclass(frozen=True)
+ class RLDSDroidDataConfig(DataConfigFactory):
+     """
+@@ -1434,6 +1502,225 @@ _CONFIGS = [
+     # RoboArena configs.
+     #
+     *roboarena_config.get_roboarena_configs(),
++    #
++    # NERO single-arm (7DoF) pure-B config: official single-arm recipe, only dims changed.
++    #
++    TrainConfig(
++        name="pi05_nero_b1",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b1",
++            base_config=DataConfig(
++                prompt_from_task=True,
++            ),
++            assets=AssetsConfig(
++                asset_id="local/pick_pink_sponge_b1",
++            ),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000,
++            peak_lr=2.5e-5,
++            decay_steps=30_000,
++            decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    # pi05_nero_b1_abs = 2×2 矩阵补格: 32clean + delta=False(绝对). 配方同 b1/b2_abs, 只 delta 开关 off.
++    # norm_stats 必须按 abs 签名单独算 (b1 那份是 delta 签名 mean≈0, 不能复用; abs 要关节 mean 在真实角度量级)。
++    TrainConfig(
++        name="pi05_nero_b1_abs",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b1",
++            use_delta_joint_actions=False,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b1"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        num_workers=32,  # 96核多worker加速 norm_stats + 训练数据加载 (不影响结果, 采样器按seed定序)
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    #
++    # NERO b2 recovery (131 ep = 32 clean + 99 recovery). 同 v8/b1 配方 (30k/h10/ema0.99/cosine)。
++    # 3 变体共用底模, 区别在数据集 + delta 开关 (norm_stats 各算一份, config 名给 assets 分目录):
++    #   pi05_nero_b2     : B-delta (b2 数据集, use_delta_joint_actions=True,  跟 b1 同)
++    #   pi05_nero_b2_abs : B-abs   (b2 数据集, use_delta_joint_actions=False, czj 要的绝对空间)
++    #   pi05_nero_b2_ref : ref-abs (b2_ref 数据集: next_qpos/rad/夹爪[0,1] 已烤入, delta=False)
++    #
++    TrainConfig(
++        name="pi05_nero_b2",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2",
++            use_delta_joint_actions=True,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    TrainConfig(
++        name="pi05_nero_b2_abs",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2",
++            use_delta_joint_actions=False,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    TrainConfig(
++        name="pi05_nero_b2_ref",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2_ref",
++            use_delta_joint_actions=False,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2_ref"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    # SERVE-ONLY twin of pi05_nero_b2_ref: identical model/data/asset_id (so it loads the SAME
++    # rad+[0,1] norm_stats baked into each b2_ref checkpoint) but serve_convert_degmm=True adds
++    # the deg+mm <-> rad+[0,1] conversion layer. Use this config name when serving ref ckpts so
++    # the server speaks the deg+mm contract and client_b connects unchanged. NOT for training.
++    TrainConfig(
++        name="pi05_nero_b2_ref_serve",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2_ref",
++            use_delta_joint_actions=False,
++            serve_convert_degmm=True,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2_ref"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=3_000,
++        keep_period=3_000,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    #
++    # NERO b2 backbone bench (vla_backbone_bench/CONTRACT.md): held-out comparison configs.
++    # Data = local/pick_pink_sponge_b2_train = b2 restricted to split.json train_episodes (111 of
++    # 131 eps / 38025 frames); the 20 val episodes are EXCLUDED so offline action-error on
++    # val_anchors.npz is leak-free. Recipe is a verbatim copy of pi05_nero_b2 (delta joints +
++    # absolute gripper, h10, batch16, 30k, cosine 2.5e-5, ema 0.99) so every knob THIS FILE sets is
++    # identical between the two bench configs.
++    #
++    # But "differ only in the backbone" (what this comment used to claim) is FALSE, and the board
++    # row must not be read that way. `_load_norm_stats` sets
++    #     use_quantile_norm = model_config.model_type != ModelType.PI0        (config.py:187)
++    # so pi0 normalizes with z-score (mean/std) and pi0.5 with quantiles ((q99-q01)/2). That is
++    # upstream and NOT selectable here -- you cannot have pi0.5 without quantile norm in this
++    # stack -- so the comparison is between two (backbone, normalization) PAIRS, not two backbones.
++    # It is measurable, not hypothetical: logs/openpi_gripper_confound.json puts the
++    # normalization-only null for the gripper/arm ratio-of-ratios at 1.961x while the measured
++    # value is 1.072x, i.e. the artifact runs OPPOSITE to the raw gap and masks pi0's gripper.
++    # save_interval/keep_period relaxed vs b2 because /home2 is disk-tight.
++    # NOT for production serving -- pi05_nero_b2_ref remains the production model.
++    #
++    TrainConfig(
++        name="pi05_nero_b2_train",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2_train",
++            use_delta_joint_actions=True,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2_train"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        num_workers=16,  # data-loading throughput only (sampler is seed-determined); same for both bench configs
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=20_000,
++        keep_period=None,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        ema_decay=0.99,
++    ),
++    # Same as above but pi0 (pi05=False) off the pi0_base checkpoint: continuous state input in
++    # the suffix instead of discrete state tokens, no adaRMSNorm timestep injection, and
++    # max_token_len 48 instead of 200 (Pi0Config.__post_init__), and -- see the note above -- z-score
++    # rather than quantile normalization, which is forced by model_type. Everything this file sets
++    # is identical; those four are bundled with the model type and cannot be varied independently.
++    TrainConfig(
++        name="pi0_nero_b2_train",
++        model=pi0_config.Pi0Config(pi05=False, action_horizon=10),
++        data=LeRobotNeroDataConfig(
++            repo_id="local/pick_pink_sponge_b2_train",
++            use_delta_joint_actions=True,
++            base_config=DataConfig(prompt_from_task=True),
++            assets=AssetsConfig(asset_id="local/pick_pink_sponge_b2_train"),
++            default_prompt="pick the pink sponge and place it in the blue bucket",
++        ),
++        num_workers=16,  # data-loading throughput only (sampler is seed-determined); same for both bench configs
++        batch_size=16,
++        num_train_steps=30_000,
++        log_interval=50,
++        save_interval=20_000,
++        keep_period=None,
++        lr_schedule=_optimizer.CosineDecaySchedule(
++            warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6,
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
++        ema_decay=0.99,
++    ),
+ ]
+ 
+ if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

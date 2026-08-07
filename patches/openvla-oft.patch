@@ -1,0 +1,147 @@
+--- a/prismatic/__init__.py
++++ b/prismatic/__init__.py
+@@ -1 +1,9 @@
+-from .models import available_model_names, available_models, get_model_description, load
++# The eager re-export below belongs to the *pretraining* API, whose import chain reaches the
++# TensorFlow/RLDS data pipeline (tensorflow, tensorflow_datasets, dlimp). The NERO b2 fine-tune
++# uses a map-style torch Dataset instead (prismatic/vla/datasets/nero_dataset.py), so those deps
++# are not installed. Keep the re-export when they are available, skip it when they are not --
++# behaviour is unchanged in an environment with the full upstream dependency set.
++try:
++    from .models import available_model_names, available_models, get_model_description, load
++except ImportError:  # pragma: no cover - optional pretraining-only deps
++    pass
+--- a/prismatic/models/__init__.py
++++ b/prismatic/models/__init__.py
+@@ -1,2 +1,7 @@
+-from .load import available_model_names, available_models, get_model_description, load, load_vla
+-from .materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
++# See prismatic/__init__.py: these re-exports pull in the TF/RLDS pretraining pipeline, which the
++# NERO b2 fine-tune does not use. Guarded so the package still imports without those optional deps.
++try:
++    from .load import available_model_names, available_models, get_model_description, load, load_vla
++    from .materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
++except ImportError:  # pragma: no cover - optional pretraining-only deps
++    pass
+--- a/prismatic/vla/__init__.py
++++ b/prismatic/vla/__init__.py
+@@ -1 +1,6 @@
+-from .materialize import get_vla_dataset_and_collator
++# See prismatic/__init__.py: `materialize` reaches the TF/RLDS data pipeline. Guarded so that
++# prismatic.vla.constants / action_tokenizer / datasets.nero_dataset import without those deps.
++try:
++    from .materialize import get_vla_dataset_and_collator
++except ImportError:  # pragma: no cover - optional pretraining-only deps
++    pass
+--- a/prismatic/vla/datasets/__init__.py
++++ b/prismatic/vla/datasets/__init__.py
+@@ -1 +1,6 @@
+-from .datasets import DummyDataset, EpisodicRLDSDataset, RLDSBatchTransform, RLDSDataset
++# RLDS datasets need tensorflow/tensorflow_datasets/dlimp; the NERO variant (nero_dataset.py) does
++# not. Guarded so `from prismatic.vla.datasets.nero_dataset import ...` works without those deps.
++try:
++    from .datasets import DummyDataset, EpisodicRLDSDataset, RLDSBatchTransform, RLDSDataset
++except ImportError:  # pragma: no cover - optional RLDS-only deps
++    pass
+--- a/prismatic/vla/constants.py
++++ b/prismatic/vla/constants.py
+@@ -4,6 +4,7 @@
+ Attempts to automatically identify the correct constants to set based on the Python command used to launch
+ training or evaluation. If it is unclear, defaults to using the LIBERO simulation benchmark constants.
+ """
++import os
+ import sys
+ from enum import Enum
+ 
+@@ -44,12 +45,37 @@
+     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+ }
+ 
++# NERO b2 (cobot_magic single arm, 8-dim absolute joint targets, 30 fps).
++# BOUNDS (not BOUNDS_Q99) for the same reason as ALOHA: the action space is absolute joint
++# angles, so clipping outliers would make certain reachable joint angles unrepresentable.
++NERO_CONSTANTS = {
++    "NUM_ACTIONS_CHUNK": 8,
++    "ACTION_DIM": 8,
++    "PROPRIO_DIM": 8,
++    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS,
++}
++
+ 
+ # Function to detect robot platform from command line arguments
+ def detect_robot_platform():
++
++    robot_env = os.environ.get('ROBOT_PLATFORM', '').upper()
++    if robot_env:
++        env_mapping = {
++            'LIBERO': 'LIBERO',
++            'ALOHA': 'ALOHA',
++            'BRIDGE': 'BRIDGE',
++            'NERO': 'NERO',
++        }
++        if robot_env in env_mapping:
++            print(f"Detected robot platform from environment: {env_mapping[robot_env]}")
++            return env_mapping[robot_env]
++
+     cmd_args = " ".join(sys.argv).lower()
+ 
+-    if "libero" in cmd_args:
++    if "nero" in cmd_args:
++        return "NERO"
++    elif "libero" in cmd_args:
+         return "LIBERO"
+     elif "aloha" in cmd_args:
+         return "ALOHA"
+@@ -70,6 +96,8 @@
+     constants = ALOHA_CONSTANTS
+ elif ROBOT_PLATFORM == "BRIDGE":
+     constants = BRIDGE_CONSTANTS
++elif ROBOT_PLATFORM == "NERO":
++    constants = NERO_CONSTANTS
+ 
+ # Assign constants to global variables
+ NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]
+--- a/experiments/robot/openvla_utils.py
++++ b/experiments/robot/openvla_utils.py
+@@ -1,5 +1,7 @@
+ """Utils for evaluating OpenVLA or fine-tuned OpenVLA policies."""
+ 
++from __future__ import annotations  # keep `tf.Tensor` annotations lazy when TF is absent (see below)
++
+ import filecmp
+ import json
+ import os
+@@ -12,12 +14,20 @@
+ import json_numpy
+ import numpy as np
+ import requests
+-import tensorflow as tf
+ import torch
+ from huggingface_hub import HfApi, hf_hub_download
+ from PIL import Image
+ from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
+ 
++# TensorFlow is only used by the image helpers below (`resize_image_for_policy`,
++# `crop_and_resize`, `center_crop_image`). The NERO b2 bench feeds frames that are already at
++# OPENVLA_IMAGE_SIZE and does not use center crop, so TF is not installed in that venv; the
++# rest of this module (model loading, get_vla_action, auto_map sync) must still import.
++try:
++    import tensorflow as tf
++except ImportError:  # pragma: no cover - TF-only image helpers stay unavailable
++    tf = None
++
+ # Apply JSON numpy patch for serialization
+ json_numpy.patch()
+ 
+@@ -30,8 +40,10 @@
+ from prismatic.vla.constants import (
+     ACTION_DIM,
+     ACTION_PROPRIO_NORMALIZATION_TYPE,
++    # `prismatic.vla.datasets.rlds.utils.data_utils` only re-exports this from here, and importing
++    # it via that path drags in the TF/dlimp RLDS pipeline. Same object either way.
++    NormalizationType,
+ )
+-from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
+ 
+ # Initialize important constants
+ DATE = time.strftime("%Y_%m_%d")

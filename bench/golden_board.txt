@@ -1,0 +1,14 @@
+
+=== NERO b2 held-out (1397 anchors, K=8, per-joint MAE, raw joint units) ===
+backbone               MAE  arm(0-6)  grip(7)   per-joint j0..j7
+pi05                 1.265     1.164    1.971    0.82  1.68  0.81  1.12  1.01  1.08  1.62  1.97
+pi0                  1.332     1.209    2.194    0.87  1.76  0.90  1.11  1.05  1.11  1.65  2.19
+openvla_oft          1.642     1.564    2.184    1.39  2.08  1.42  1.42  1.41  1.37  1.84  2.18
+gr00t_n17            1.648     1.511    2.601    1.11  2.27  1.10  1.45  1.30  1.31  2.03  2.60
+smolvla              1.929     1.855    2.453    1.26  2.54  1.40  1.71  1.63  1.70  2.76  2.45
+gr00t_n15            2.047     1.972    2.565    1.75  2.70  1.76  1.81  1.75  1.71  2.32  2.57
+act                  2.727     2.676    3.088    2.31  3.34  2.17  2.34  2.39  2.66  3.52  3.09
+[hold-state]         3.072     2.535    6.829    1.35  6.37  1.38  2.84  1.40  1.34  3.07  6.83  <-- pass line (do-nothing baseline)
+
+(lower=better; arm in deg, gripper in its unit; open-loop first-K prediction vs GT)
+(hold-state pass line: MAE 3.072 — a real backbone must beat this)
