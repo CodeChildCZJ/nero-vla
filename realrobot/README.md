@@ -13,7 +13,8 @@ For the closed-loop protocol, the serving contract and the unit conventions, see
 ## Current production model
 
 **`pi05_nero_b2_ref` @ step 29999**, served by `realrobot/serve/serve_b2_ref.sh` under the
-config `pi05_nero_b2_ref_serve`.
+config `pi05_nero_b2_ref_serve`. Since 2026-09-05 **`pi05_nero_b2_abs` @ 29999 is co-mainline**
+— the on-robot comparison could not separate the two (see [The 2×2 result](#the-22-result)).
 
 Trained from `pi05_base` on the b2 recovery dataset re-encoded into radians + gripper `[0,1]`,
 with absolute action targets (`use_delta_joint_actions=False`), `action_horizon=10`,
@@ -44,20 +45,53 @@ quoted are from the launcher comments in `realrobot/train/`.
 
 ## The 2×2 result
 
-Four checkpoints, evaluated on the physical robot. The ranking:
+Four checkpoints, run on the physical robot on 2026-06-20. **Read the two axes separately —
+they are not backed by the same strength of evidence.** An earlier version of this section
+published a single ordering, `ref > b2_abs > b2_delta >> b1_abs`; the middle comparison in that
+chain does not survive the numbers below and has been retracted.
+
+### Data axis — established
+
+Same action convention, only the dataset differs:
 
 ```
-ref  >  b2_abs  >  b2_delta  >>  b1_abs (clean data)
+b2_abs (131 ep, recovery)  grasps        b1_abs (32 ep, clean)  does not
 ```
 
-**The data dominates; the action convention is secondary.** The gap between the two *data*
-conditions (recovery vs clean) is much larger than the gap between the two *convention*
-conditions — the `>>` above is where the ranking actually separates. Adding demonstrations of
-*recovering from a bad approach* did more than any hyper-parameter or parameterization change
-across the whole v1→b2 sequence.
+`b1_abs` fails at 21k steps and again at 29999, so more optimizer steps do not rescue clean
+data. The mechanism was read off the trajectory logs: clean demonstrations contain no "the
+wrist drifted, pull it back" samples, so in closed loop the policy cannot hold j7 inside the
+training grasp manifold (−15° to 60°) and issues the close command at j7 = 90–96°. Recovery
+episodes supply exactly those corrective samples. This is the single largest intervention
+across the whole v1→b2 sequence — larger than any hyper-parameter or parameterization change.
 
-This is a real-robot ranking, not a success-rate table: per-condition success rates were not
-recorded in a form that survives into this repository.
+### Convention axis — mostly NOT established
+
+The controlled protocol (same five sponge placements per model, success rate recorded) was
+specified but its results were never written down. The only cross-model number that survives is
+the grasp-trigger rate, measured over **unaligned** test positions:
+
+| checkpoint | rollouts that triggered a grasp | vs `b2_ref`, Fisher exact |
+|---|---|---|
+| `b2_ref` | 8/10 | — |
+| `b2_abs` | 5/8 | **p = 0.61 — not separated** |
+| `b2_delta` | 1/8 | p = 0.015 |
+| `b1_abs` (clean) | 2/5 | p = 0.25 |
+
+`b2_delta` being worst is real. **`ref > b2_abs` is not a measured result and must not be cited
+as one** — at 21k both were described at the time as "both grasp, no visible difference", and
+at 29999 the two are 0.61 apart on the only metric that exists. Since 2026-09-05 both are
+treated as co-mainline; `b2_abs` is in fact the simpler deployment (native deg+mm, no
+conversion layer), and is the fallback if the `b2_ref` serve-time conversion ever misbehaves.
+
+Also note that trigger rate is not task success: closing the gripper is necessary but not
+sufficient for picking the sponge up and placing it.
+
+One mechanism worth recording because it was proposed and then falsified: `b2_delta` was
+thought to fail by error accumulation. It does not — commanded step size stays around 1° and
+*shrinks* across a rollout (1.0° → 0.3°). It fails by stalling short of a graspable
+configuration, which is why 6 of its 8 rollouts never close the gripper at all. The ordering
+survived the correction; the explanation did not.
 
 Note what this implies for [`bench/`](../bench/README.md): the benchmark scores fits to
 *clean* demonstration actions. The intervention that mattered most on hardware was adding a
